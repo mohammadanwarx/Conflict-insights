@@ -1,0 +1,30 @@
+# R-specific files
+.Rhistory
+.Rprofile
+.RData
+*.Rproj
+.Rproj.user/
+
+# Data files
+data/raw/*.csv
+data/raw/*.xlsx
+data/raw/*.json
+
+# Output files
+output/*.png
+output/*.pdf
+output/*.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+*.tmp
