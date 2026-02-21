@@ -1,23 +1,33 @@
-# Script 04: Animated Sudan Conflict Map
-# Purpose: Animate fatalities over time on Sudan map with event type legend
-# Output: Animated GIF saved to output/
+# DRC (Democratic Republic of Congo) Conflict Animation
+# Purpose: Create animated visualization of conflict fatalities over time
+# Output: output/drc_conflict_animated.gif
+#
+# Data sources:
+#   - data/raw/Africa_aggregated_data_up_to-2026-02-07.xlsx (ACLED conflict data)
+#   - data/raw/drc_adm2.gpkg (DRC administrative boundaries - auto-downloaded)
+
+#===================================
+# Fix PROJ database conflict (PostgreSQL/PostGIS)
+#===================================
+Sys.unsetenv("PROJ_LIB")
+Sys.unsetenv("PROJ_DATA")
 
 #===================================
 # Set Working Directory
 #===================================
-# For interactive use, set project root manually
-project_root <- "D:/Mo/projects/conflict insight/Conflict-insights"
-
-# Auto-detect when running as script
-args <- commandArgs(trailingOnly = FALSE)
-script_path <- NULL
-for (arg in args) {
-  if (startsWith(arg, "--file=")) {
-    script_path <- normalizePath(sub("--file=", "", arg))
-    project_root <- dirname(dirname(script_path))
-    break
+project_root <- tryCatch({
+  args <- commandArgs(trailingOnly = FALSE)
+  for (arg in args) {
+    if (startsWith(arg, "--file=")) {
+      script_path <- normalizePath(sub("--file=", "", arg))
+      return(dirname(dirname(script_path)))
+    }
   }
-}
+  if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    return(dirname(dirname(rstudioapi::getActiveDocumentContext()$path)))
+  }
+  getwd()
+}, error = function(e) getwd())
 
 setwd(project_root)
 cat("Working directory:", getwd(), "\n")
@@ -32,7 +42,7 @@ if (!dir.exists(user_lib_path)) {
 }
 .libPaths(c(user_lib_path, .libPaths()))
 
-required_packages <- c("tidyverse", "lubridate", "sf", "gganimate", "gifski", "patchwork", "magick")
+required_packages <- c("tidyverse", "lubridate", "sf", "gganimate", "gifski", "patchwork", "magick", "readxl", "geodata")
 for (pkg in required_packages) {
   if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
     cat("Installing:", pkg, "\n")
@@ -48,25 +58,68 @@ library(gganimate)
 library(gifski)
 library(patchwork)
 library(magick)
+library(readxl)
+library(geodata)
 
-# Load processed Sudan data
-data <- read_csv("data/processed/Sudan_fatalities_filtered.csv", show_col_types = FALSE)
-cat("Loaded", nrow(data), "records\n")
+#===================================
+# Download DRC ADM2 boundaries if needed
+#===================================
+drc_gpkg_path <- "data/raw/drc_adm2.gpkg"
 
-# Load Sudan ADM2 boundaries from our downloaded shapefile
-sudan_adm2 <- st_read("data/raw/sudan_adm2.gpkg", quiet = TRUE)
-cat("Loaded Sudan ADM2 with", nrow(sudan_adm2), "regions\n")
+if (!file.exists(drc_gpkg_path)) {
+  cat("Downloading DRC ADM2 boundaries...\n")
+  drc_adm2_raw <- gadm(country = "COD", level = 2, path = "data/raw")
+  drc_adm2 <- st_as_sf(drc_adm2_raw)
+  st_write(drc_adm2, drc_gpkg_path, delete_dsn = TRUE)
+  cat("Saved DRC boundaries to:", drc_gpkg_path, "\n")
+} else {
+  drc_adm2 <- st_read(drc_gpkg_path, quiet = TRUE)
+}
+cat("Loaded DRC ADM2 with", nrow(drc_adm2), "regions\n")
 
-# Prepare data for animation - aggregate by month and event type
+#===================================
+# Load and process DRC data from Excel
+#===================================
+excel_path <- "data/raw/Africa_aggregated_data_up_to-2026-02-07.xlsx"
+
+cat("Loading data from Excel...\n")
+raw_data <- read_excel(excel_path)
+cat("Total records in Excel:", nrow(raw_data), "\n")
+
+# Rename columns to lowercase for consistency
+names(raw_data) <- tolower(names(raw_data))
+names(raw_data)[names(raw_data) == "centroid_latitude"] <- "latitude"
+names(raw_data)[names(raw_data) == "centroid_longitude"] <- "longitude"
+
+# Filter for DRC only
+data <- raw_data %>%
+  filter(country == "Democratic Republic of Congo") %>%
+  mutate(week = as.Date(week)) %>%
+  filter(week >= as.Date("2009-01-01")) %>%
+  mutate(
+    fatalities = as.numeric(fatalities),
+    events = as.numeric(events),
+    latitude = as.numeric(latitude),
+    longitude = as.numeric(longitude)
+  ) %>%
+  filter(fatalities > 0)
+
+cat("DRC records (2009+, fatalities > 0):", nrow(data), "\n")
+
+# Save processed data
+write_csv(data, "data/processed/DRC_fatalities_filtered.csv")
+cat("Saved processed data to: data/processed/DRC_fatalities_filtered.csv\n")
+
+#===================================
+# Prepare data for animation
+#===================================
 anim_data <- data %>%
   mutate(
     year_month = floor_date(week, "month"),
     date_label = format(year_month, "%B %Y")
   ) %>%
-  # Filter to only show data after January 2023
-  filter(year_month >= as.Date("2023-01-01")) %>%
-  # Filter to only show major event types
-  filter(event_type %in% c("battles", "violence against civilians", "explosions/remote violence")) %>%
+  filter(tolower(event_type) %in% c("battles", "violence against civilians", "explosions/remote violence")) %>%
+  mutate(event_type = tolower(event_type)) %>%
   group_by(year_month, date_label, event_type, latitude, longitude) %>%
   summarise(
     total_fatalities = sum(fatalities, na.rm = TRUE),
@@ -76,7 +129,7 @@ anim_data <- data %>%
   filter(!is.na(latitude) & !is.na(longitude)) %>%
   arrange(year_month)
 
-# Create ordered factor for chronological animation (oldest to newest)
+# Create ordered factor for chronological animation
 date_order <- anim_data %>%
   distinct(year_month, date_label) %>%
   arrange(year_month) %>%
@@ -87,62 +140,66 @@ anim_data <- anim_data %>%
 
 cat("Prepared", nrow(anim_data), "aggregated records for animation\n")
 
-# Prepare data for line chart - aggregate by month and event type only
-line_data <- data %>%
+# Prepare data for line chart - ensure all months have all event types
+line_data_raw <- data %>%
   mutate(
     year_month = floor_date(week, "month"),
     date_label = format(year_month, "%B %Y")
   ) %>%
-  filter(year_month >= as.Date("2023-01-01")) %>%
-  filter(event_type %in% c("battles", "violence against civilians", "explosions/remote violence")) %>%
+  filter(tolower(event_type) %in% c("battles", "violence against civilians", "explosions/remote violence")) %>%
+  mutate(event_type = tolower(event_type)) %>%
   group_by(year_month, date_label, event_type) %>%
   summarise(
     total_fatalities = sum(fatalities, na.rm = TRUE),
     .groups = "drop"
-  ) %>%
+  )
+
+# Create complete grid of all months × all event types
+all_months <- line_data_raw %>% distinct(year_month, date_label)
+all_event_types <- tibble(event_type = c("battles", "violence against civilians", "explosions/remote violence"))
+complete_grid <- crossing(all_months, all_event_types)
+
+# Fill missing combinations with 0 fatalities
+line_data <- complete_grid %>%
+  left_join(line_data_raw, by = c("year_month", "date_label", "event_type")) %>%
+  mutate(total_fatalities = replace_na(total_fatalities, 0)) %>%
   arrange(year_month) %>%
   mutate(date_label = factor(date_label, levels = date_order))
 
-# Create data for current point indicator (for animation sync)
 line_data_points <- line_data %>%
   mutate(state_label = date_label)
 
 cat("Prepared", nrow(line_data), "records for line chart\n")
 
-# Prepare cumulative fatalities data for animated counters
+# Prepare cumulative fatalities data for line chart
 cumulative_data <- line_data %>%
   group_by(event_type) %>%
   arrange(year_month) %>%
   mutate(cumulative_fatalities = cumsum(total_fatalities)) %>%
   ungroup() %>%
-  select(year_month, date_label, event_type, cumulative_fatalities)
+  mutate(state_label = date_label)
 
-# Calculate total cumulative fatalities across all event types
 total_cumulative <- cumulative_data %>%
   group_by(year_month, date_label) %>%
   summarise(cumulative_fatalities = sum(cumulative_fatalities), .groups = "drop") %>%
   mutate(event_type = "Total",
          state_label = date_label)
 
-# Combine for animation
 counter_data <- bind_rows(cumulative_data, total_cumulative) %>%
   mutate(
     state_label = date_label,
-    # Position for each counter (y-axis)
     y_pos = case_when(
       event_type == "battles" ~ 4,
       event_type == "violence against civilians" ~ 3,
       event_type == "explosions/remote violence" ~ 2,
       event_type == "Total" ~ 1
     ),
-    # Labels
     label_text = case_when(
       event_type == "battles" ~ "Battles",
       event_type == "violence against civilians" ~ "Violence Against Civilians",
       event_type == "explosions/remote violence" ~ "Explosions/Remote Violence",
       event_type == "Total" ~ "TOTAL FATALITIES"
     ),
-    # Colors
     text_color = case_when(
       event_type == "battles" ~ "#E41A1C",
       event_type == "violence against civilians" ~ "#377EB8",
@@ -153,19 +210,23 @@ counter_data <- bind_rows(cumulative_data, total_cumulative) %>%
 
 cat("Prepared cumulative data for animated counters\n")
 
-# Define color palette for 3 event types
+#===================================
+# Define color palette
+#===================================
 event_colors <- c(
   "battles" = "#E41A1C",
   "violence against civilians" = "#377EB8",
   "explosions/remote violence" = "#FF7F00"
 )
 
-# Create animated map
+#===================================
+# Create animated map (same style as Sudan)
+#===================================
 p_map <- ggplot() +
-  # Sudan ADM2 boundaries as background (transparent with visible lines)
-  geom_sf(data = sudan_adm2, fill = NA, color = "gray40", linewidth = 0.3) +
-  # ADM2 labels (clearer)
-  geom_sf_text(data = sudan_adm2, aes(label = NAME_2), size = 2.5, color = "black", fontface = "bold", check_overlap = TRUE) +
+  # DRC ADM2 boundaries as background
+  geom_sf(data = drc_adm2, fill = NA, color = "gray40", linewidth = 0.3) +
+  # ADM2 labels 
+  geom_sf_text(data = drc_adm2, aes(label = NAME_2), size = 2, color = "black", fontface = "bold", check_overlap = TRUE) +
   # Conflict points
   geom_point(
     data = anim_data,
@@ -174,30 +235,22 @@ p_map <- ggplot() +
         color = event_type),
     alpha = 0.4
   ) +
-  # Color scale with larger legend
   scale_color_manual(
     values = event_colors, 
     name = "Event Type",
-    guide = guide_legend(
-      override.aes = list(size = 6, alpha = 0.8)
-    )
+    guide = guide_legend(override.aes = list(size = 6, alpha = 0.8))
   ) +
-  # Size scale with transparent circles (outline only)
   scale_size_continuous(
     range = c(3, 18),
     name = "Fatalities",
     labels = scales::comma,
-    guide = guide_legend(
-      override.aes = list(fill = NA, color = "black", stroke = 1.5, alpha = 1, shape = 21)
-    )
+    guide = guide_legend(override.aes = list(fill = NA, color = "black", stroke = 1.5, alpha = 1, shape = 21))
   ) +
-  # Labels
   labs(
-    title = "Sudan Conflict Fatalities",
+    title = "DRC Conflict Fatalities",
     subtitle = "{closest_state}",
     caption = ""
   ) +
-  # Theme
   theme_minimal() +
   theme(
     plot.title = element_text(face = "bold", size = 22, hjust = 0.5, color = "darkblue", margin = margin(b = 2)),
@@ -212,35 +265,29 @@ p_map <- ggplot() +
     axis.ticks = element_blank(),
     plot.margin = margin(5, 5, 0, 5)
   ) +
-  # Coordinate limits for Sudan (tighter fit)
-  coord_sf(xlim = c(21.5, 38.5), ylim = c(8.5, 22.5), expand = FALSE) +
-  # Animation
+  # DRC coordinate bounds
+  coord_sf(xlim = c(11.5, 32), ylim = c(-14, 6), expand = FALSE) +
   transition_states(
     date_label,
-    transition_length = 2,
-    state_length = 1
+    transition_length = 1,
+    state_length = 2
   ) +
   enter_fade() +
   exit_fade()
 
-# Create animated line chart (synchronized with map)
-p_line <- ggplot() +
-  # Full line (static background)
-  geom_line(data = line_data, aes(x = year_month, y = total_fatalities, color = event_type, group = event_type), 
-            linewidth = 1.2, alpha = 0.3) +
-  # Animated points showing current month
-  geom_point(data = line_data_points, aes(x = year_month, y = total_fatalities, color = event_type), size = 5) +
-  # Vertical line indicator for current date
-  geom_vline(data = line_data_points %>% distinct(year_month, state_label), 
-             aes(xintercept = year_month), 
-             color = "darkred", linewidth = 1, linetype = "dashed", alpha = 0.5) +
+#===================================
+# Create animated line chart (cumulative fatalities)
+#===================================
+p_line <- ggplot(cumulative_data, aes(x = year_month, y = cumulative_fatalities, color = event_type, group = event_type)) +
+  geom_line(linewidth = 0.8, alpha = 0.7) +
+  geom_point(size = 2.5) +
   scale_color_manual(values = event_colors, name = "Event Type") +
   scale_y_continuous(labels = scales::comma) +
-  scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+  scale_x_date(date_labels = "%Y", date_breaks = "3 years") +
   labs(
-    title = "Monthly Fatalities by Event Type",
+    title = "Cumulative Fatalities by Event Type",
     x = NULL,
-    y = "Fatalities",
+    y = "Cumulative Fatalities",
     caption = "Data Source: ACLED | Author: Mo Anwar"
   ) +
   theme_minimal() +
@@ -253,15 +300,11 @@ p_line <- ggplot() +
     panel.grid.minor = element_blank(),
     plot.margin = margin(0, 5, 0, 5)
   ) +
-  # Animation - use same transition_states as map
-  transition_states(
-    state_label,
-    transition_length = 2,
-    state_length = 1
-  )
+  transition_reveal(year_month)
 
-# Create animated counters panel manually (frame by frame)
-# Prepare counter data with pre-formatted labels
+#===================================
+# Create counter frames
+#===================================
 counter_plot_data <- counter_data %>%
   mutate(
     value_label = as.character(scales::comma(cumulative_fatalities)),
@@ -269,93 +312,92 @@ counter_plot_data <- counter_data %>%
     text_color = as.character(text_color)
   )
 
-# Function to create a single counter frame
 create_counter_frame <- function(state) {
   frame_data <- counter_plot_data %>% filter(state_label == state)
   
   p <- ggplot(frame_data, aes(y = y_pos)) +
     geom_text(aes(x = 0, label = label_text, color = text_color),
-              hjust = 0, size = 3.2, fontface = "bold") +
+              hjust = 0, size = 2.8, fontface = "bold") +
     geom_text(aes(x = 1, label = value_label, color = text_color),
-              hjust = 1, size = 4.5, fontface = "bold") +
+              hjust = 1, size = 3.8, fontface = "bold") +
     scale_color_identity() +
     scale_x_continuous(limits = c(-0.05, 1.05)) +
     scale_y_continuous(limits = c(0.5, 4.5)) +
     labs(title = "Cumulative Fatalities") +
     theme_void() +
     theme(
-      plot.title = element_text(face = "bold", size = 11, hjust = 0.5, margin = margin(t = 0, b = 5)),
-      plot.margin = margin(0, 5, 0, 5),
+      plot.title = element_text(face = "bold", size = 10, hjust = 0.5, margin = margin(t = 0, b = 5)),
+      plot.margin = margin(0, 3, 0, 3),
       plot.background = element_rect(fill = "white", color = NA)
     )
   
   return(p)
 }
 
-# Render all animations separately
+#===================================
+# Render animations
+#===================================
 cat("Rendering map animation...\n")
-anim_map <- animate(
+
+# Calculate number of states for frame allocation
+n_states <- length(unique(anim_data$date_label))
+cat("Number of monthly time states:", n_states, "\n")
+
+# Use 2 frames per state for current speed
+n_anim_frames <- n_states * 2
+
+anim_map <- gganimate::animate(
   p_map,
-  nframes = 200,
-  fps = 5,
+  nframes = n_anim_frames,
+  fps = 8,
   width = 900,
   height = 750,
   renderer = gifski_renderer()
 )
 
 cat("Rendering line chart animation...\n")
-anim_line <- animate(
+anim_line <- gganimate::animate(
   p_line,
-  nframes = 200,
-  fps = 5,
-  width = 550,
-  height = 200,
+  nframes = n_anim_frames,
+  fps = 8,
+  width = 650,
+  height = 250,
   renderer = gifski_renderer()
 )
 
-# Create counter frames manually
+# Create counter frames
 cat("Creating counter frames...\n")
 temp_dir <- tempdir()
 states <- levels(counter_plot_data$state_label)
-n_states <- length(states)
 
-# Map uses transition_length=2, state_length=1, so ratio is 3 frames per state
-# But gganimate calculates nframes differently - let's match the actual map frame count
-# First render map to get actual frame count
 map_gif <- image_read(anim_map)
 actual_map_frames <- length(map_gif)
 cat("Map has", actual_map_frames, "frames for", n_states, "states\n")
 
-# Calculate frames per state to match map timing
 frames_per_state <- actual_map_frames / n_states
 
 counter_frames <- list()
 for (i in seq_along(states)) {
   p <- create_counter_frame(states[i])
-  
-  # Save temporary PNG
   temp_file <- file.path(temp_dir, sprintf("counter_%04d.png", i))
-  ggsave(temp_file, p, width = 350/96, height = 200/96, dpi = 96, bg = "white")
-  
-  # Read image
+  ggsave(temp_file, p, width = 250/96, height = 250/96, dpi = 96, bg = "white")
   img <- image_read(temp_file)
   
-  # Calculate how many frames this state should have
   start_frame <- round((i - 1) * frames_per_state) + 1
   end_frame <- round(i * frames_per_state)
   n_frames_for_state <- end_frame - start_frame + 1
   
-  # Add frames for this state
   for (j in 1:n_frames_for_state) {
     counter_frames[[length(counter_frames) + 1]] <- img
   }
 }
 
-# Combine counter frames into a gif
 counter_gif <- do.call(c, counter_frames)
 cat("Counter frames generated:", length(counter_gif), "\n")
 
-# Read line animation
+#===================================
+# Combine animations
+#===================================
 cat("Combining animations...\n")
 line_gif <- image_read(anim_line)
 
@@ -363,18 +405,16 @@ cat("Map frames:", length(map_gif), "\n")
 cat("Line frames:", length(line_gif), "\n")
 cat("Counter frames:", length(counter_gif), "\n")
 
-# Ensure same number of frames
 n_frames <- min(length(map_gif), length(line_gif), length(counter_gif))
 
 # Combine: map on top, line chart and counters side by side below
 combined_frames <- lapply(1:n_frames, function(i) {
-  # Combine line chart and counters horizontally
   bottom_row <- image_append(c(line_gif[i], counter_gif[i]), stack = FALSE)
-  # Stack map on top of the bottom row
   image_append(c(map_gif[i], bottom_row), stack = TRUE)
 })
 combined_gif <- do.call(c, combined_frames)
 
 # Save combined animation
-image_write(combined_gif, path = "output/sudan_conflict_animated.gif")
-cat("Animation saved to: output/sudan_conflict_animated.gif\n")
+output_path <- "output/drc_conflict_animated.gif"
+image_write(combined_gif, path = output_path)
+cat("Animation saved to:", output_path, "\n")

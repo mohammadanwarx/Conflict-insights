@@ -4,6 +4,7 @@
 .RData
 *.Rproj
 .Rproj.user/
+Rplots.pdf
 
 # Data files
 data/raw/*.csv
@@ -28,3 +29,5 @@ Thumbs.db
 # Cache
 .cache/
 *.tmp
+data/raw/gadm/
+data/raw/tiles/
