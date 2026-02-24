@@ -359,7 +359,7 @@ create_line_frame <- function(state_label_value) {
                size = 3) +
     scale_color_manual(values = event_colors, guide = "none") +
     scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0.02, 0.1))) +
-    scale_x_date(date_labels = "%Y", date_breaks = "3 years", 
+    scale_x_date(date_labels = "%Y", date_breaks = "1 year", 
                  limits = range(cumulative_data$year_month)) +
     labs(
       title = "Cumulative Fatalities by Event Type",
