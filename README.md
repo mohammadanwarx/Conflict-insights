@@ -1,6 +1,6 @@
 ﻿# Conflict Insights
 
-Animated visualizations of conflict fatalities in Africa using ACLED data. Optimized for social media sharing (1200x1200px).
+Animated visualizations of conflict fatalities in Africa using ACLED data.
 
 ## Outputs
 
